@@ -116,20 +116,17 @@ def finish_episode(policies, optimizers):
     
     kernel = np.exp(distance_matrix[:, :] * (-1.0 / h))
     kernel_gradient = kernel[:, :, None] * (2.0 / h) * (params[None, :, :] - params[:, None, :])
-    
-    weights = (1.0 / args.temp) * kernel[:, :, None] * gradient[:, None, :] + kernel_gradient[:, :, :]
 
-    weights = -np.mean(weights[:, :, :], axis=0)
+    weights = (1.0 / args.temp) * kernel[:, :, None] * gradient[:, None, :] + kernel_gradient[:, :, :]
+    weights = np.mean(weights[:, :, :], axis=0)
 
     weights = torch.tensor(weights).float().to(device)
     # update param gradients
     for i in range(args.num_agents):
         vector_to_parameters(weights[i],
             policies[i].parameters(), grad=True)
-        
-        # I don't think we need to step?
-        # optimizers[i].step()
-
+                
+        optimizers[i].step()
 
 def main():
     policies = []
@@ -147,17 +144,23 @@ def main():
         env.seed(args.seed + i)
         envs.append(env)
 
-    for i_episode in count(100):
+    max_reward = 0
+    for i_episode in range(10000):
+        if i_episode % 1000 == 0:
+            print("Episode", i_episode)
+        
         for i in range(args.num_agents):
             state = envs[i].reset()
-            for t in range(10000):  # Don't infinite loop while learning
+            for t in range(1000):  # Don't infinite loop while learning
                 action = select_action(policies[i], state)
                 state, reward, done, _ = envs[i].step(action)
                 policies[i].rewards.append(reward)
                 if done:
                     break
 
-            print('Agent: {}, Reward: {}'.format(i, np.sum(policies[i].rewards)))
+            if np.sum(policies[i].rewards) > max_reward:
+                print('Agent: {}, Reward: {}, Episode: {}'.format(i, np.sum(policies[i].rewards), i_episode))
+                max_reward = np.sum(policies[i].rewards)
 
         finish_episode(policies, optimizers)
         for i in range(args.num_agents): 
