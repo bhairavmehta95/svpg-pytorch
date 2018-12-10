@@ -9,7 +9,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 
-from svpg import SVGD
 from utils import *
 
 
@@ -48,8 +47,8 @@ class Policy(nn.Module):
         self.saved_log_probs = []
         self.rewards = []
 
-def select_action(state):
-    state = torch.from_numpy(state).float().unsqueeze(0)
+def select_action(policy, state):
+    state = torch.from_numpy(state).float().unsqueeze(0).to(device)
     probs = policy(state)
     m = Categorical(probs)
     action = m.sample()
@@ -57,23 +56,25 @@ def select_action(state):
     return action.item()
 
 
-def finish_episode():
+def finish_episode(policies, optimizers):
     policy_grads = []
     parameters = [] 
     for i in range(args.num_agents):
+        policy_grad_agent = []
         R = 0
         rewards = []
         
         for r in policies[i].rewards[::-1]:
             R = r + args.gamma * R
             rewards.insert(0, R)
-        rewards = torch.tensor(rewards)
+        rewards = torch.from_numpy(np.array(rewards)).float().unsqueeze(0).to(device)
         rewards = (rewards - rewards.mean()) / (rewards.std() + eps)
         for log_prob, reward in zip(policies[i].saved_log_probs, rewards):
-            policy_grad.append(-log_prob * reward)
+            policy_grad_agent.append(-log_prob * reward)
 
-        optimizer.zero_grad()
-        policy_grad = torch.cat(policy_grad).sum()
+        optimizers[i].zero_grad()
+
+        policy_grad = torch.cat(policy_grad_agent).sum()
         policy_grad.backward()
 
         vec_param, vec_policy_grad = parameters_to_vector(
@@ -82,10 +83,10 @@ def finish_episode():
         policy_grads.append(vec_policy_grad.unsqueeze(0))
         parameters.append(vec_param.unsqueeze(0))
 
-    params = torch.cat(parameters)
+    params = torch.cat(parameters).cpu().numpy()
 
     # No negation, negated in L73
-    gradient = torch.cat(policy_grads)
+    gradient = torch.cat(policy_grads).cpu().numpy()
 
     ## Get distance matrix
     distance_matrix = np.sum(np.square(params[None, :, :] - params[:, None, :]), axis=-1)
@@ -94,7 +95,7 @@ def finish_episode():
     distance_vector.sort()
     median = 0.5 * (
     distance_vector[int(len(distance_vector) / 2)] + distance_vector[int(len(distance_vector) / 2) - 1])
-    h = median / (2 * np.log(args.num_of_agents + 1))
+    h = median / (2 * np.log(args.num_agents + 1))
 
     # if args.adaptive_kernel:
     #     L_min = None
@@ -120,6 +121,7 @@ def finish_episode():
 
     weights = -np.mean(weights[:, :, :], axis=0)
 
+    weights = torch.tensor(weights).float().to(device)
     # update param gradients
     for i in range(args.num_agents):
         vector_to_parameters(weights[i],
@@ -155,7 +157,9 @@ def main():
                 if done:
                     break
 
-        finish_episode()
+            print('Agent: {}, Reward: {}'.format(i, np.sum(policies[i].rewards)))
+
+        finish_episode(policies, optimizers)
         for i in range(args.num_agents): 
             policies[i].reset()
 
