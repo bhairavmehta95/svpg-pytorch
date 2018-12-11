@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 
+import math
+
 from utils import *
 
 
@@ -17,11 +19,7 @@ parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor (default: 0.99)')
 parser.add_argument('--seed', type=int, default=543, metavar='N',
                     help='random seed (default: 543)')
-parser.add_argument('--render', action='store_true',
-                    help='render the environment')
-parser.add_argument('--log-interval', type=int, default=10, metavar='N',
-                    help='interval between training status logs (default: 10)')
-parser.add_argument('--num-agents', type=int, default=4,
+parser.add_argument('--num-agents', type=int, default=16,
                     help='number of agents to run in parallel')
 parser.add_argument('--temp', type=float, default=10.0)
 
@@ -29,6 +27,8 @@ parser.add_argument('--temp', type=float, default=10.0)
 args = parser.parse_args()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 eps = np.finfo(np.float32).eps.item()
+
+
 
 class Policy(nn.Module):
     def __init__(self):
@@ -56,6 +56,42 @@ def select_action(policy, state):
     return action.item()
 
 
+def _squared_dist(X):
+    """Computes squared distance between each row of `X`, ||X_i - X_j||^2
+
+    Args:
+        X (Tensor): (S, P) where S is number of samples, P is the dim of 
+            one sample
+
+    Returns:
+        (Tensor) (S, S)
+    """
+    XXT = torch.mm(X, X.t())
+    XTX = XXT.diag()
+    return -2.0 * XXT + XTX + XTX.unsqueeze(1)
+
+
+def _Kxx_dxKxx(X):
+    """
+    Computes covariance matrix K(X,X) and its gradient w.r.t. X
+    for RBF kernel with design matrix X, as in the second term in eqn (8)
+    of reference SVGD paper.
+
+    Args:
+        X (Tensor): (S, P), design matrix of samples, where S is num of
+            samples, P is the dim of each sample which stacks all params
+            into a (1, P) row. Thus P could be 1 millions.
+    """
+    squared_dist = _squared_dist(X)
+    l_square = 0.5 * squared_dist.median() / math.log(args.num_agents)
+    Kxx = torch.exp(-0.5 / l_square * squared_dist)
+    # matrix form for the second term of optimal functional gradient
+    # in eqn (8) of SVGD paper
+    dxKxx = (Kxx.sum(1).diag() - Kxx).matmul(X) / l_square
+
+    return Kxx, dxKxx
+
+
 def finish_episode(policies, optimizers):
     policy_grads = []
     parameters = [] 
@@ -69,8 +105,9 @@ def finish_episode(policies, optimizers):
             rewards.insert(0, R)
         rewards = torch.from_numpy(np.array(rewards)).float().unsqueeze(0).to(device)
         rewards = (rewards - rewards.mean()) / (rewards.std() + eps)
+
         for log_prob, reward in zip(policies[i].saved_log_probs, rewards):
-            policy_grad_agent.append(-log_prob * reward)
+            policy_grad_agent.append(log_prob * reward)
 
         optimizers[i].zero_grad()
 
@@ -83,49 +120,20 @@ def finish_episode(policies, optimizers):
         policy_grads.append(vec_policy_grad.unsqueeze(0))
         parameters.append(vec_param.unsqueeze(0))
 
-    params = torch.cat(parameters).cpu().numpy()
+    # calculating the kernel matrix and its gradients
+    parameters = torch.cat(parameters)
+    Kxx, dxKxx = _Kxx_dxKxx(parameters)
+    policy_grads = torch.cat(policy_grads)
+    # this line needs S x P memory
+    grad_logp = torch.mm(Kxx, policy_grads)
+    # negate grads here!!!
+    grad_theta = - (grad_logp + dxKxx) / args.num_agents
+    # explicitly deleting variables does not release memory :(
 
-    # No negation, negated in L73
-    gradient = torch.cat(policy_grads).cpu().numpy()
-
-    ## Get distance matrix
-    distance_matrix = np.sum(np.square(params[None, :, :] - params[:, None, :]), axis=-1)
-    # get median
-    distance_vector = distance_matrix.flatten()
-    distance_vector.sort()
-    median = 0.5 * (
-    distance_vector[int(len(distance_vector) / 2)] + distance_vector[int(len(distance_vector) / 2) - 1])
-    h = median / (2 * np.log(args.num_agents + 1))
-
-    # if args.adaptive_kernel:
-    #     L_min = None
-    #     alpha_best = None
-    #     for alpha in args.search_space:
-    #         kernel_alpha = np.exp(distance_matrix * (-alpha / h))
-    #         mean_kernel = np.sum(kernel_alpha, axis = 1)
-    #         L = np.mean(np.square(mean_kernel - 2.0 * np.ones_like(mean_kernel)))
-    #         logger.log("Current Loss {:} and Alpha : {:}".format(L, alpha))
-    #         if L_min is None:
-    #             L_min = L
-    #             alpha_best = alpha
-    #         elif L_min > L:
-    #             L_min = L
-    #             alpha_best = alpha
-    #     logger.record_tabular('Best Alpha', alpha_best)
-    #     h =  h / alpha_best
-    
-    kernel = np.exp(distance_matrix[:, :] * (-1.0 / h))
-    kernel_gradient = kernel[:, :, None] * (2.0 / h) * (params[None, :, :] - params[:, None, :])
-
-    weights = (1.0 / args.temp) * kernel[:, :, None] * gradient[:, None, :] + kernel_gradient[:, :, :]
-    weights = np.mean(weights[:, :, :], axis=0)
-
-    weights = torch.tensor(weights).float().to(device)
     # update param gradients
     for i in range(args.num_agents):
-        vector_to_parameters(weights[i],
-            policies[i].parameters(), grad=True)
-                
+        vector_to_parameters(grad_theta[i],
+             policies[i].parameters(), grad=True)
         optimizers[i].step()
 
 def main():
