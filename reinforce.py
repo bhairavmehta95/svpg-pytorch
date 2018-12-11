@@ -28,19 +28,20 @@ args = parser.parse_args()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 eps = np.finfo(np.float32).eps.item()
 
-
-
+print(device)
 class Policy(nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
-        self.affine1 = nn.Linear(4, 128)
-        self.affine2 = nn.Linear(128, 2)
+        self.affine1 = nn.Linear(8, 128)
+        self.affine2 = nn.Linear(128, 128)
+        self.affine3 = nn.Linear(128, 4)
 
         self.reset()
 
     def forward(self, x):
         x = F.relu(self.affine1(x))
-        action_scores = self.affine2(x)
+        x = F.relu(self.affine2(x))
+        action_scores = self.affine3(x)
         return F.softmax(action_scores, dim=1)
 
     def reset(self):
@@ -148,15 +149,21 @@ def main():
         optimizer = optim.Adam(policy.parameters(), lr=1e-2)
         policies.append(policy)
         optimizers.append(optimizer)
-        env = gym.make('CartPole-v0')
+        env = gym.make('LunarLander-v2')
         env.seed(args.seed + i)
         envs.append(env)
 
     max_reward = 0
-    for i_episode in range(10000):
-        if i_episode % 1000 == 0:
-            print("Episode", i_episode)
-        
+    for i_episode in range(100000):
+        if i_episode % 500 == 0:
+            print("----Episode {}----".format(i_episode))
+            for i in range(args.num_agents): 
+                print('Agent: {}, Reward: {}'.format(i, np.sum(policies[i].rewards)))
+            print("------------------")
+
+        for i in range(args.num_agents):     
+            policies[i].reset()
+
         for i in range(args.num_agents):
             state = envs[i].reset()
             for t in range(1000):  # Don't infinite loop while learning
@@ -171,8 +178,7 @@ def main():
                 max_reward = np.sum(policies[i].rewards)
 
         finish_episode(policies, optimizers)
-        for i in range(args.num_agents): 
-            policies[i].reset()
+        
 
 if __name__ == '__main__':
     main()
