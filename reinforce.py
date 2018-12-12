@@ -21,7 +21,7 @@ parser.add_argument('--seed', type=int, default=543, metavar='N',
                     help='random seed (default: 543)')
 parser.add_argument('--num-agents', type=int, default=16,
                     help='number of agents to run in parallel')
-parser.add_argument('--temp', type=float, default=10.0)
+parser.add_argument('--temp', type=float, default=5.0)
 
 # Global Variables
 args = parser.parse_args()
@@ -32,9 +32,9 @@ print(device)
 class Policy(nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
-        self.affine1 = nn.Linear(8, 128)
+        self.affine1 = nn.Linear(4, 128)
         self.affine2 = nn.Linear(128, 128)
-        self.affine3 = nn.Linear(128, 4)
+        self.affine3 = nn.Linear(128, 2)
 
         self.reset()
 
@@ -124,7 +124,7 @@ def finish_episode(policies, optimizers):
     # calculating the kernel matrix and its gradients
     parameters = torch.cat(parameters)
     Kxx, dxKxx = _Kxx_dxKxx(parameters)
-    policy_grads = torch.cat(policy_grads)
+    policy_grads = 1 / args.temp * torch.cat(policy_grads)
     # this line needs S x P memory
     grad_logp = torch.mm(Kxx, policy_grads)
     # negate grads here!!!
@@ -146,17 +146,17 @@ def main():
 
     for i in range(args.num_agents):
         policy = Policy().to(device)
-        optimizer = optim.Adam(policy.parameters(), lr=1e-2)
+        optimizer = optim.Adam(policy.parameters(), lr=1e-4)
         policies.append(policy)
         optimizers.append(optimizer)
-        env = gym.make('LunarLander-v2')
+        env = gym.make('CartPole-v0')
         env.seed(args.seed + i)
         envs.append(env)
 
     max_reward = 0
     for i_episode in range(100000):
         if i_episode % 500 == 0:
-            print("----Episode {}----".format(i_episode))
+            print("---- Temp: {} - Episode {}----".format(args.temp, i_episode))
             for i in range(args.num_agents): 
                 print('Agent: {}, Reward: {}'.format(i, np.sum(policies[i].rewards)))
             print("------------------")

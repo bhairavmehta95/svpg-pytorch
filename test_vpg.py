@@ -91,10 +91,10 @@ def main():
                 break
 
         running_reward = running_reward * 0.99 + t * 0.01
-        finish_episode()
         if i_episode % args.log_interval == 0:
-            print('Episode {}\tLast length: {:5d}\tAverage length: {:.2f}'.format(
-                i_episode, t, running_reward))
+            print('Episode {}\t, Reward: {}'.format(
+                i_episode, np.sum(policy.rewards)))
+        finish_episode()
         if running_reward > env.spec.reward_threshold:
             print("Solved! Running reward is now {} and "
                   "the last episode runs to {} time steps!".format(running_reward, t))
